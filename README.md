@@ -52,6 +52,10 @@ Should run on Linux, Windows and macOS (not tested).
 | Amplitude (vertical) zoom | `Shift` + `+` / `-`, or the Amp buttons (1:1 resets) |
 | Pan | shift + wheel, horizontal scroll, or the scrollbar |
 
+## Screenshot
+
+![Screenshot](Screenshot.png)
+
 ## Building
 
 ```sh
