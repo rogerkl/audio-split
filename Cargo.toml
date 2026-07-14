@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 flacenc = { version = "0.5", default-features = false }
-iced = { version = "0.13", features = ["canvas", "tokio"] }
+iced = { version = "0.13", features = ["canvas", "tokio", "advanced"] }
 metaflac = "0.2"
 rfd = "0.15"
 rodio = { version = "0.19", default-features = false }

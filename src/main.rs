@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use iced::advanced::widget::{operate, operation, Id as WidgetId};
 use iced::keyboard;
 use iced::widget::{
     button, canvas, column, container, horizontal_space, pick_list, row, scrollable, slider, text,
@@ -78,6 +79,8 @@ pub enum Message {
 
     AlbumTitle(String),
     AlbumArtist(String),
+    TabPressed { shift: bool },
+    FocusFound(Option<WidgetId>, bool),
 
     ExportCue,
     CuePathChosen(Option<PathBuf>),
@@ -92,6 +95,49 @@ pub enum Message {
 }
 
 const DEFAULT_DEVICE: &str = "System default";
+
+const ALBUM_ARTIST_INPUT: &str = "album-artist";
+const ALBUM_TITLE_INPUT: &str = "album-title";
+
+fn title_input_id(marker_id: u64) -> String {
+    format!("title-{marker_id}")
+}
+
+fn artist_input_id(marker_id: u64) -> String {
+    format!("artist-{marker_id}")
+}
+
+/// Like `operation::focusable::find_focused`, but resolves to `None` instead
+/// of producing no outcome when nothing is focused, so Tab with no focus can
+/// still land on the first field.
+fn find_focused_input() -> impl operation::Operation<Option<WidgetId>> {
+    struct FindFocused {
+        focused: Option<WidgetId>,
+    }
+
+    impl operation::Operation<Option<WidgetId>> for FindFocused {
+        fn focusable(&mut self, state: &mut dyn operation::Focusable, id: Option<&WidgetId>) {
+            if state.is_focused() && id.is_some() {
+                self.focused = id.cloned();
+            }
+        }
+
+        fn container(
+            &mut self,
+            _id: Option<&WidgetId>,
+            _bounds: iced::Rectangle,
+            operate_on_children: &mut dyn FnMut(&mut dyn operation::Operation<Option<WidgetId>>),
+        ) {
+            operate_on_children(self);
+        }
+
+        fn finish(&self) -> operation::Outcome<Option<WidgetId>> {
+            operation::Outcome::Some(self.focused.clone())
+        }
+    }
+
+    FindFocused { focused: None }
+}
 
 struct App {
     audio: Option<Arc<AudioData>>,
@@ -161,6 +207,18 @@ impl Default for App {
 }
 
 impl App {
+    /// Tab order for the metadata inputs: album fields first, then every
+    /// track title, then every track artist (usually left empty).
+    fn tab_order(&self) -> Vec<String> {
+        let mut order = vec![
+            ALBUM_ARTIST_INPUT.to_string(),
+            ALBUM_TITLE_INPUT.to_string(),
+        ];
+        order.extend(self.markers.iter().map(|m| title_input_id(m.id)));
+        order.extend(self.markers.iter().map(|m| artist_input_id(m.id)));
+        order
+    }
+
     fn canvas_width(&self) -> f64 {
         (self.window_width - 24.0).max(100.0) as f64
     }
@@ -505,6 +563,27 @@ impl App {
             Message::AlbumTitle(s) => self.album_title = s,
             Message::AlbumArtist(s) => self.album_artist = s,
 
+            Message::TabPressed { shift } => {
+                return operate(find_focused_input())
+                    .map(move |found| Message::FocusFound(found, shift));
+            }
+            Message::FocusFound(found, shift) => {
+                let order = self.tab_order();
+                let current = found
+                    .and_then(|f| order.iter().position(|name| WidgetId::new(name.clone()) == f));
+                let next = match current {
+                    Some(i) if shift => (i + order.len() - 1) % order.len(),
+                    Some(i) => (i + 1) % order.len(),
+                    None if shift => order.len() - 1,
+                    None => 0,
+                };
+                let id = text_input::Id::new(order[next].clone());
+                return Task::batch([
+                    text_input::focus(id.clone()),
+                    text_input::select_all(id),
+                ]);
+            }
+
             Message::ExportCue => {
                 let Some(audio) = &self.audio else {
                     return Task::none();
@@ -743,6 +822,10 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let keys = keyboard::on_key_press(|key, mods| match key.as_ref() {
+            // Focused text inputs ignore Tab, so this fires while editing too.
+            keyboard::Key::Named(keyboard::key::Named::Tab) => Some(Message::TabPressed {
+                shift: mods.shift(),
+            }),
             keyboard::Key::Named(keyboard::key::Named::Space) => Some(Message::PlayPause),
             keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
                 Some(Message::SeekVisible(-0.05))
@@ -916,10 +999,12 @@ impl App {
         let album_bar = row![
             text("Album artist").size(13),
             text_input("Album artist", &self.album_artist)
+                .id(text_input::Id::new(ALBUM_ARTIST_INPUT))
                 .on_input(Message::AlbumArtist)
                 .width(300),
             text("Album title").size(13),
             text_input("Album title", &self.album_title)
+                .id(text_input::Id::new(ALBUM_TITLE_INPUT))
                 .on_input(Message::AlbumTitle)
                 .width(300),
             horizontal_space(),
@@ -949,12 +1034,14 @@ impl App {
                     text(format!("{:02}", i + 1)).size(14).width(30),
                     text(format_time(m.pos as f64 / sr)).size(13).width(90),
                     text_input("Title", &m.title)
+                        .id(text_input::Id::new(title_input_id(m.id)))
                         .on_input({
                             let id = m.id;
                             move |s| Message::MarkerTitle(id, s)
                         })
                         .width(Length::FillPortion(3)),
                     text_input("Artist (album artist if empty)", &m.artist)
+                        .id(text_input::Id::new(artist_input_id(m.id)))
                         .on_input({
                             let id = m.id;
                             move |s| Message::MarkerArtist(id, s)
