@@ -5,7 +5,7 @@ A small desktop tool for turning a single continuous audio recording
 tagged FLAC tracks.
 
 Built in Rust with [iced](https://iced.rs). 
-Should run on Linux, Windows and macOS (not tested).
+Should run on Linux, Windows and macOS.
 
 ## Features
 
@@ -55,6 +55,22 @@ Should run on Linux, Windows and macOS (not tested).
 ## Screenshot
 
 ![Screenshot](Screenshot.png)
+
+## Download release
+
+Download the latest release for your operating system from the release page.
+
+### Security issues
+
+Since the executable is not signed, it may be flagged on mac and windows.
+
+**Mac users** need to move the download to the Application folder and 
+disable the quarantine. Open a terminal and execute this line: 
+```sh
+xattr -d com.apple.quarantine /Applications/AudioSplit.app 
+```
+
+**Windows users** should extract the zip file and run the exe file inside it. You **may** get a Microsoft Defender warning about an unrecognized app, if so, click **More info** and **Run anyway** 
 
 ## Building
 
