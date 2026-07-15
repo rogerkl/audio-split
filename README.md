@@ -70,7 +70,15 @@ disable the quarantine. Open a terminal and execute this line:
 xattr -d com.apple.quarantine /Applications/AudioSplit.app 
 ```
 
+[Video: Download and install on macOS](https://github.com/user-attachments/assets/1dce08b9-07c5-46b5-ab77-72787adac3b8)
+
 **Windows users** should extract the zip file and run the exe file inside it. You **may** get a Microsoft Defender warning about an unrecognized app, if so, click **More info** and **Run anyway** 
+
+If you get an error with 'VCRUNTIME140.dll was not found', install this
+
+[Visual C++ v14 Redistributable](https://aka.ms/vc14/vc_redist.x64.exe)
+
+[Video: Download and run on Windows](https://github.com/user-attachments/assets/01b01071-1682-4a55-8352-8ef77e6f6735)
 
 ## Building
 
