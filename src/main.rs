@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use iced::advanced::widget::{operate, operation, Id as WidgetId};
 use iced::keyboard;
 use iced::widget::{
-    button, canvas, column, container, horizontal_space, pick_list, row, scrollable, slider, text,
-    text_input, Canvas,
+    button, canvas, checkbox, column, container, horizontal_space, pick_list, row, scrollable,
+    slider, text, text_input, Canvas,
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 
@@ -64,6 +64,8 @@ pub enum Message {
     SetPlayhead(usize),
     PlayPause,
     Stop,
+    PrevTrack,
+    NextTrack,
     /// Move the playhead by this fraction of the visible waveform span,
     /// so arrow-key steps scale with the zoom level.
     SeekVisible(f64),
@@ -79,6 +81,7 @@ pub enum Message {
 
     AlbumTitle(String),
     AlbumArtist(String),
+    SetReadOnly(bool),
     TabPressed { shift: bool },
     FocusFound(Option<WidgetId>, bool),
 
@@ -150,6 +153,11 @@ struct App {
     album_title: String,
     album_artist: String,
 
+    /// When set, marker and metadata editing is blocked so the app acts as a
+    /// pure player. Defaults to on when the tracks came from a cue sheet
+    /// (a .cue file or one embedded in a FLAC), off for raw audio.
+    read_only: bool,
+
     view: ViewParams,
     /// Vertical (amplitude) zoom factor, >= 1.
     v_zoom: f32,
@@ -183,6 +191,7 @@ impl Default for App {
             next_id: 0,
             album_title: String::new(),
             album_artist: String::new(),
+            read_only: false,
             view: ViewParams::default(),
             v_zoom: 1.0,
             window_width: 1280.0,
@@ -280,7 +289,39 @@ impl App {
         self.play_anchor = None;
     }
 
+    /// Moves the playhead to `pos`, scrolls it into view, and keeps playing
+    /// from there if playback was running.
+    fn jump_to(&mut self, pos: usize) {
+        self.playhead = pos;
+        let width = self.canvas_width();
+        let x = (pos as f64 - self.view.offset) / self.view.fpp;
+        if x < 0.0 || x > width {
+            self.view = self.clamp_view(pos as f64 - 0.1 * width * self.view.fpp, self.view.fpp);
+        }
+        self.wf_cache.clear();
+        if self.playing {
+            self.start_playback();
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
+        // In read-only mode every editing message is dropped, so markers and
+        // metadata cannot change no matter where the message came from
+        // (buttons, canvas gestures, or the M key).
+        if self.read_only {
+            match &message {
+                Message::Detect
+                | Message::AddMarkerAtPlayhead
+                | Message::AddMarkerAt(_)
+                | Message::MoveMarker(..)
+                | Message::DeleteMarker(_)
+                | Message::MarkerTitle(..)
+                | Message::MarkerArtist(..)
+                | Message::AlbumTitle(_)
+                | Message::AlbumArtist(_) => return Task::none(),
+                _ => {}
+            }
+        }
         match message {
             Message::OpenFile => {
                 if self.loading {
@@ -312,7 +353,9 @@ impl App {
                         }
                     }
                 } else {
-                    self.pending_cue = None;
+                    // A FLAC may carry a cue sheet as a CUESHEET vorbis
+                    // comment; load it just like an opened .cue file.
+                    self.pending_cue = cue::read_embedded_cue(&path);
                     path
                 };
                 self.loading = true;
@@ -335,6 +378,9 @@ impl App {
                     format_time(audio.duration_secs()),
                 );
                 self.next_id = 0;
+                // Cue-derived tracklists open as a player by default; raw
+                // audio opens ready for editing.
+                self.read_only = self.pending_cue.is_some();
                 if let Some(parsed) = self.pending_cue.take() {
                     let sr = audio.sample_rate as f64;
                     let frames = audio.frames();
@@ -369,7 +415,10 @@ impl App {
                         .collect();
                     self.album_artist = parsed.album_artist;
                     self.album_title = parsed.album_title;
-                    self.status = format!("{info} — {} tracks from cue sheet", self.markers.len());
+                    self.status = format!(
+                        "{info} — {} tracks from cue sheet (read-only)",
+                        self.markers.len()
+                    );
                 } else {
                     self.markers = vec![Marker {
                         id: 0,
@@ -464,6 +513,41 @@ impl App {
             Message::Stop => {
                 self.stop_playback();
             }
+            Message::NextTrack => {
+                if let Some(pos) = self
+                    .markers
+                    .iter()
+                    .map(|m| m.pos)
+                    .find(|&p| p > self.playhead)
+                {
+                    self.jump_to(pos);
+                }
+            }
+            Message::PrevTrack => {
+                if let Some(audio) = &self.audio {
+                    // Like most players: restart the current track, unless we
+                    // are near its start — then go to the previous one.
+                    let near = (3.0 * audio.sample_rate as f64) as usize;
+                    let current = self
+                        .markers
+                        .iter()
+                        .map(|m| m.pos)
+                        .filter(|&p| p <= self.playhead)
+                        .last();
+                    let target = match current {
+                        Some(cur) if self.playhead > cur + near => cur,
+                        Some(cur) => self
+                            .markers
+                            .iter()
+                            .map(|m| m.pos)
+                            .filter(|&p| p < cur)
+                            .last()
+                            .unwrap_or(0),
+                        None => 0,
+                    };
+                    self.jump_to(target);
+                }
+            }
             Message::SeekVisible(fraction) => {
                 if let Some(audio) = &self.audio {
                     let delta = fraction * self.canvas_width() * self.view.fpp;
@@ -548,20 +632,23 @@ impl App {
             Message::GotoMarker(id) => {
                 if let Some(m) = self.markers.iter().find(|m| m.id == id) {
                     let pos = m.pos;
-                    self.playhead = pos;
-                    let width = self.canvas_width();
-                    let x = (pos as f64 - self.view.offset) / self.view.fpp;
-                    if x < 0.0 || x > width {
-                        self.view = self
-                            .clamp_view(pos as f64 - 0.1 * width * self.view.fpp, self.view.fpp);
+                    self.jump_to(pos);
+                    if !self.playing {
+                        self.start_playback();
                     }
-                    self.wf_cache.clear();
-                    self.start_playback();
                 }
             }
 
             Message::AlbumTitle(s) => self.album_title = s,
             Message::AlbumArtist(s) => self.album_artist = s,
+            Message::SetReadOnly(v) => {
+                self.read_only = v;
+                self.status = if v {
+                    "Read-only: markers and tags are locked.".to_string()
+                } else {
+                    "Editing enabled.".to_string()
+                };
+            }
 
             Message::TabPressed { shift } => {
                 return operate(find_focused_input())
@@ -827,6 +914,20 @@ impl App {
                 shift: mods.shift(),
             }),
             keyboard::Key::Named(keyboard::key::Named::Space) => Some(Message::PlayPause),
+            // Hardware media keys; most keyboards send the combined
+            // play/pause key, but some have separate play and pause keys.
+            keyboard::Key::Named(
+                keyboard::key::Named::MediaPlayPause
+                | keyboard::key::Named::MediaPlay
+                | keyboard::key::Named::MediaPause,
+            ) => Some(Message::PlayPause),
+            keyboard::Key::Named(keyboard::key::Named::MediaStop) => Some(Message::Stop),
+            keyboard::Key::Named(keyboard::key::Named::MediaTrackPrevious) => {
+                Some(Message::PrevTrack)
+            }
+            keyboard::Key::Named(keyboard::key::Named::MediaTrackNext) => {
+                Some(Message::NextTrack)
+            }
             keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
                 Some(Message::SeekVisible(-0.05))
             }
@@ -883,12 +984,23 @@ impl App {
             button(text("Open…")).on_press(Message::OpenFile),
             text(file_label).size(14),
             horizontal_space(),
+            button(text("Prev")).on_press_maybe(
+                (self.audio.is_some() && !self.markers.is_empty()).then_some(Message::PrevTrack)
+            ),
             button(text(if self.playing { "Pause" } else { "Play" }))
                 .on_press_maybe(self.audio.as_ref().map(|_| Message::PlayPause)),
+            button(text("Next")).on_press_maybe(
+                (self.audio.is_some() && !self.markers.is_empty()).then_some(Message::NextTrack)
+            ),
             button(text("Stop")).on_press_maybe(self.audio.as_ref().map(|_| Message::Stop)),
-            button(text("+ Marker"))
-                .on_press_maybe(self.audio.as_ref().map(|_| Message::AddMarkerAtPlayhead)),
+            button(text("+ Marker")).on_press_maybe(
+                (self.audio.is_some() && !self.read_only)
+                    .then_some(Message::AddMarkerAtPlayhead)
+            ),
             horizontal_space(),
+            checkbox("Read-only", self.read_only)
+                .on_toggle(Message::SetReadOnly)
+                .text_size(13),
             button(text("Export .cue")).on_press_maybe(
                 (self.audio.is_some() && !self.markers.is_empty()).then_some(Message::ExportCue)
             ),
@@ -920,8 +1032,9 @@ impl App {
                 .step(1.0f32)
                 .width(120),
             text(format!("{:.0} s", self.min_track_secs)).size(13),
-            button(text("Detect tracks"))
-                .on_press_maybe(self.audio.as_ref().map(|_| Message::Detect)),
+            button(text("Detect tracks")).on_press_maybe(
+                (self.audio.is_some() && !self.read_only).then_some(Message::Detect)
+            ),
             horizontal_space(),
             text("Zoom").size(13),
             button(text("-")).on_press(Message::ZoomOut),
@@ -942,6 +1055,7 @@ impl App {
                 view: self.view,
                 v_zoom: self.v_zoom,
                 playhead: self.playhead,
+                read_only: self.read_only,
                 cache: &self.wf_cache,
             })
             .width(Length::Fill)
@@ -991,7 +1105,11 @@ impl App {
             ))
             .size(13),
             horizontal_space(),
-            text("Click: playhead · Double-click: add marker · Drag flag: move · Right-click flag: delete · Wheel / +/-: zoom · Shift +/-: amp zoom · Shift+wheel: pan · Space: play/pause · ←/→: step · M: marker")
+            text(if self.read_only {
+                "Read-only · Click: playhead · Wheel / +/-: zoom · Shift +/-: amp zoom · Shift+wheel: pan · Space: play/pause · ←/→: step"
+            } else {
+                "Click: playhead · Double-click: add marker · Drag flag: move · Right-click flag: delete · Wheel / +/-: zoom · Shift +/-: amp zoom · Shift+wheel: pan · Space: play/pause · ←/→: step · M: marker"
+            })
                 .size(12),
         ]
         .spacing(8);
@@ -1000,12 +1118,12 @@ impl App {
             text("Album artist").size(13),
             text_input("Album artist", &self.album_artist)
                 .id(text_input::Id::new(ALBUM_ARTIST_INPUT))
-                .on_input(Message::AlbumArtist)
+                .on_input_maybe((!self.read_only).then_some(Message::AlbumArtist))
                 .width(300),
             text("Album title").size(13),
             text_input("Album title", &self.album_title)
                 .id(text_input::Id::new(ALBUM_TITLE_INPUT))
-                .on_input(Message::AlbumTitle)
+                .on_input_maybe((!self.read_only).then_some(Message::AlbumTitle))
                 .width(300),
             horizontal_space(),
             text("Output device").size(13),
@@ -1035,22 +1153,24 @@ impl App {
                     text(format_time(m.pos as f64 / sr)).size(13).width(90),
                     text_input("Title", &m.title)
                         .id(text_input::Id::new(title_input_id(m.id)))
-                        .on_input({
+                        .on_input_maybe((!self.read_only).then_some({
                             let id = m.id;
                             move |s| Message::MarkerTitle(id, s)
-                        })
+                        }))
                         .width(Length::FillPortion(3)),
                     text_input("Artist (album artist if empty)", &m.artist)
                         .id(text_input::Id::new(artist_input_id(m.id)))
-                        .on_input({
+                        .on_input_maybe((!self.read_only).then_some({
                             let id = m.id;
                             move |s| Message::MarkerArtist(id, s)
-                        })
+                        }))
                         .width(Length::FillPortion(2)),
                     button(text("Play").size(13)).on_press(Message::GotoMarker(m.id)),
                     button(text("Delete").size(13))
                         .style(button::danger)
-                        .on_press(Message::DeleteMarker(m.id)),
+                        .on_press_maybe(
+                            (!self.read_only).then_some(Message::DeleteMarker(m.id))
+                        ),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center)

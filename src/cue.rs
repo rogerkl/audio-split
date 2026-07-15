@@ -140,6 +140,22 @@ pub fn parse_cue(text: &str) -> Result<ParsedCue, String> {
     })
 }
 
+/// Reads a cue sheet embedded in a FLAC file as a CUESHEET vorbis comment
+/// (the convention we export, also used by foobar2000 and friends).
+/// Returns `None` when the file is not FLAC, has no such comment, or the
+/// comment does not parse as a cue sheet.
+pub fn read_embedded_cue(path: &Path) -> Option<ParsedCue> {
+    let tag = metaflac::Tag::read_from_path(path).ok()?;
+    let comments = tag.vorbis_comments()?;
+    // Vorbis comment keys are case-insensitive; metaflac's map is not.
+    let text = comments
+        .comments
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("CUESHEET"))
+        .and_then(|(_, v)| v.first())?;
+    parse_cue(text).ok()
+}
+
 fn escape(s: &str) -> String {
     s.replace('"', "'")
 }

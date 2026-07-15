@@ -55,6 +55,8 @@ pub struct WaveformProgram<'a> {
     /// Vertical (amplitude) zoom factor; peaks are clamped to the lane.
     pub v_zoom: f32,
     pub playhead: usize,
+    /// Marker gestures (drag, double-click add, right-click delete) are inert.
+    pub read_only: bool,
     pub cache: &'a canvas::Cache,
 }
 
@@ -135,11 +137,12 @@ impl canvas::Program<Message> for WaveformProgram<'_> {
             mouse::Event::ButtonPressed(mouse::Button::Left) => {
                 let frame = self.clamp_frame(self.view.frame_at(pos.x));
                 if pos.y <= STRIP_H {
-                    if let Some(id) = self.hit_marker(pos.x) {
-                        state.dragging = Some(id);
-                        (Status::Captured, None)
-                    } else {
-                        (Status::Captured, Some(Message::SetPlayhead(frame)))
+                    match self.hit_marker(pos.x) {
+                        Some(id) if !self.read_only => {
+                            state.dragging = Some(id);
+                            (Status::Captured, None)
+                        }
+                        _ => (Status::Captured, Some(Message::SetPlayhead(frame))),
                     }
                 } else {
                     let is_double = state
@@ -149,7 +152,7 @@ impl canvas::Program<Message> for WaveformProgram<'_> {
                         })
                         .unwrap_or(false);
                     state.last_click = Some((std::time::Instant::now(), pos));
-                    if is_double {
+                    if is_double && !self.read_only {
                         (Status::Captured, Some(Message::AddMarkerAt(frame)))
                     } else {
                         state.scrubbing = true;
@@ -158,7 +161,7 @@ impl canvas::Program<Message> for WaveformProgram<'_> {
                 }
             }
             mouse::Event::ButtonPressed(mouse::Button::Right) => {
-                if pos.y <= STRIP_H {
+                if pos.y <= STRIP_H && !self.read_only {
                     if let Some(id) = self.hit_marker(pos.x) {
                         return (Status::Captured, Some(Message::DeleteMarker(id)));
                     }
@@ -233,7 +236,7 @@ impl canvas::Program<Message> for WaveformProgram<'_> {
             return mouse::Interaction::Grabbing;
         }
         if let Some(pos) = cursor.position_in(bounds) {
-            if pos.y <= STRIP_H && self.hit_marker(pos.x).is_some() {
+            if pos.y <= STRIP_H && !self.read_only && self.hit_marker(pos.x).is_some() {
                 return mouse::Interaction::Grab;
             }
         }

@@ -155,6 +155,18 @@ fn end_to_end() {
     assert!(embedded.contains("TRACK 03 AUDIO"));
     assert!(embedded.contains("TITLE \"Song 2\""));
 
+    // The embedded cue sheet must read back like an opened .cue file.
+    let parsed = cue::read_embedded_cue(&single_path).expect("embedded cue");
+    assert_eq!(parsed.album_artist, "Tester");
+    assert_eq!(parsed.album_title, "Test Album");
+    assert_eq!(parsed.tracks.len(), 3);
+    assert_eq!(parsed.tracks[1].title, "Song 2");
+    assert!((parsed.tracks[1].start_secs - starts[1] as f64 / 44100.0).abs() < 1.0 / 75.0);
+    // Plain audio files carry no cue sheet.
+    assert!(cue::read_embedded_cue(&wav_path).is_none());
+    let plain_flac = out_dir.join("01 - Tester - Song 1.flac");
+    assert!(cue::read_embedded_cue(&plain_flac).is_none());
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -233,6 +245,41 @@ fn open_cue_populates_app() {
     assert_eq!(app.markers[1].title, ""); // "Track 02" placeholder stripped
     assert_eq!(app.markers[1].artist, "Guest");
     assert_eq!(app.markers[1].pos, 22 * 44100);
+
+    // Prev/Next track navigation over the marker positions (0 s and 22 s).
+    let _ = app.update(crate::Message::NextTrack);
+    assert_eq!(app.playhead, 22 * 44100);
+    let _ = app.update(crate::Message::NextTrack); // no next track: stays put
+    assert_eq!(app.playhead, 22 * 44100);
+    let _ = app.update(crate::Message::SetPlayhead(30 * 44100));
+    let _ = app.update(crate::Message::PrevTrack); // >3 s in: restart track 2
+    assert_eq!(app.playhead, 22 * 44100);
+    let _ = app.update(crate::Message::PrevTrack); // near start: previous track
+    assert_eq!(app.playhead, 0);
+    let _ = app.update(crate::Message::PrevTrack); // nothing before: stays at 0
+    assert_eq!(app.playhead, 0);
+
+    // Cue-derived tracklists open read-only: editing messages are dropped.
+    assert!(app.read_only);
+    let marker_id = app.markers[0].id;
+    let _ = app.update(crate::Message::DeleteMarker(marker_id));
+    let _ = app.update(crate::Message::MarkerTitle(marker_id, "Changed".into()));
+    let _ = app.update(crate::Message::AddMarkerAt(1000));
+    let _ = app.update(crate::Message::AlbumTitle("Changed".into()));
+    assert_eq!(app.markers.len(), 2);
+    assert_eq!(app.markers[0].title, "First");
+    assert_eq!(app.album_title, "Test Album");
+
+    // Toggling read-only off re-enables editing.
+    let _ = app.update(crate::Message::SetReadOnly(false));
+    let _ = app.update(crate::Message::MarkerTitle(marker_id, "Changed".into()));
+    assert_eq!(app.markers[0].title, "Changed");
+
+    // Re-loading raw audio (no pending cue) resets to editable.
+    let audio = Arc::new(audio::load(&wav_path).unwrap());
+    let _ = app.update(crate::Message::SetReadOnly(true));
+    let _ = app.update(crate::Message::Loaded(Ok(audio)));
+    assert!(!app.read_only);
 
     std::fs::remove_dir_all(&dir).ok();
 }
